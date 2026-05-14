@@ -48,10 +48,11 @@ def training_step(unet, scheduler, x_0, optimizer):
     return loss.item()
 
 if __name__ == "__main__":
-    print("=== Training step smoke test (dummy data) ===\n")
+    from data import get_mnist_loader
+
+    print("=== Training step smoke test (real MNIST) ===\n")
 
     # --- Setup ---
-    B = 4
     T = 1000
     n_iterations = 100
 
@@ -61,8 +62,13 @@ if __name__ == "__main__":
     scheduler = DiffusionScheduler(T=T)
     optimizer = Adam(unet.parameters(), lr=1e-4)
 
-    # 같은 dummy 배치를 반복 학습 → loss 가 줄어들면 학습 메커니즘 작동
-    x_0 = torch.randn(B, 1, 28, 28)
+    # 실제 MNIST 배치 하나 가져와서 그 배치만 반복 학습
+    # → 네트워크가 그 배치를 "외우는지" 로 학습 메커니즘 검증
+    loader = get_mnist_loader(batch_size=8)  # CPU 라서 작게
+    x_0, _ = next(iter(loader))
+    print(f"MNIST batch shape: {tuple(x_0.shape)}")
+    print(f"Value range:       [{x_0.min():.3f}, {x_0.max():.3f}]")
+    print(f"Running {n_iterations} iterations...\n")
 
     # --- Training loop ---
     losses = []
@@ -77,12 +83,12 @@ if __name__ == "__main__":
     print(f"Final loss:   {losses[-1]:.4f}")
     print(f"Reduction:    {losses[0] - losses[-1]:+.4f}")
 
-    # --- Loss curve plot ---
+    # --- Plot ---
     plt.figure(figsize=(8, 5))
     plt.plot(losses)
     plt.xlabel("Iteration")
     plt.ylabel("MSE Loss")
-    plt.title("Training step smoke test (dummy data)")
+    plt.title("Training step smoke test (real MNIST batch)")
     plt.grid(True, alpha=0.3)
-    plt.savefig("loss_curve_dummy.png", dpi=100, bbox_inches="tight")
-    print("\nSaved: loss_curve_dummy.png")
+    plt.savefig("loss_curve_mnist.png", dpi=100, bbox_inches="tight")
+    print("\nSaved: loss_curve_mnist.png")
