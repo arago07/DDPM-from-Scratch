@@ -53,34 +53,90 @@ class DiffusionScheduler:
 
         return sqrt_ab * x_0 + sqrt_omab * noise
     
-if __name__ == "__main__":
-    print("=== DiffusionScheduler sanity check ===")
+    def p_sample(self, unet, x_t, t):
+        """
+        Reverse process: predict x_{t-1} from x_t using the UNet model
+        
+        x_{t-1} = (1/sqrt(alpha_t)) * (x_t - (beta_t / sqrt(1 - alpha_bar_t)) * pred_noise) + sigma_t * z
+        
+        Args:
+            unet: UNet model to predict noise
+            x_t: (B, C, H, W) noisy image at timestep t
+            t: (B,) timesteps for each image in the batch(dtype=long)
 
-    scheduler = DiffusionScheduler(T=1000)
+        Returns:
+            x_{t-1}: (B, C, H, W) less noisy image
+        """
+        B = x_t.shape[0]
 
-    # Schedule shape & range 확인
-    print(f"beta:       shape {tuple(scheduler.beta.shape)}, "
-          f"range [{scheduler.beta[0]:.2e}, {scheduler.beta[-1]:.2e}]")
-    print(f"alpha_bar:  shape {tuple(scheduler.alpha_bar.shape)}, "
-          f"range [{scheduler.alpha_bar[-1]:.2e}, {scheduler.alpha_bar[0]:.4f}]")
+        # t -> (B,) tensor
+        t_batch = torch.full((B,), t, device=x_t.device, dtype=torch.long)
 
-    # Dummy 이미지
-    B = 4
-    x_0 = torch.randn(B, 1, 28, 28)
+        # UNet으로 noise 예측
+        pred_noise = unet(x_t, t_batch)
 
-    # ---- t=0: 거의 변화 없어야 함 ----
-    t_low = torch.zeros(B, dtype=torch.long)
-    x_low = scheduler.q_sample(x_0, t_low)
-    diff_low = (x_low - x_0).abs().mean().item()
-    print(f"\nt=0:    |x_t - x_0| 평균 = {diff_low:.4f}  (작아야 함, 보통 < 0.05)")
+        # alpha_t, alpha_bar_t, beta_t
+        alpha_t = self.alpha[t]
+        alpha_bar_t = self.alpha_bar[t]
+        beta_t = self.beta[t]
 
-    # ---- t=T-1: 거의 순수 가우시안 노이즈 ----
-    t_high = torch.full((B,), 999, dtype=torch.long)
-    x_high = scheduler.q_sample(x_0, t_high)
-    print(f"t=999:  mean = {x_high.mean().item():+.4f}, "
-          f"std = {x_high.std().item():.4f}  (mean ≈ 0, std ≈ 1 이어야 함)")
+        # the mean of reverse distribution
+        coef = beta_t / torch.sqrt(1 - alpha_bar_t)
+        mean = (1 / torch.sqrt(alpha_t)) * (x_t - coef * pred_noise)
 
-    # ---- Shape 체크 ----
-    assert x_low.shape == x_0.shape
-    assert x_high.shape == x_0.shape
-    print("\nShape OK")
+        # in the last step (t=0), we don't add noise
+        if t > 0:
+            z = torch.randn_like(x_t)
+            sigma_t = torch.sqrt(beta_t)
+            return mean + sigma_t * z
+        else:
+            return mean
+    
+    @torch.no_grad()
+    def sample(self, unet, n_samples, image_channels=1, image_size=28, device="cpu"):
+        """
+        Generate image from pure noise by iteratively applying p_sample from t=T-1 to t=0
+        
+        Returns:
+            x_0: generated image (n_samples, C, H, W)
+        """
+        unet.eval()
+
+        # start from x_T ~ N(0, 1)
+        x = torch.randn(n_samples, image_channels, image_size, image_size, device=device)
+
+        # t = T-1, T-2, ..., 0
+        for t in reversed(range(self.T)):
+            x = self.p_sample(unet, x, t)
+
+            if (t % 200 == 0):
+                print(f".   sampling... t={t}")
+
+        return x
+    
+    @torch.no_grad()
+    def sample_progressive(self, unet, n_samples, image_channels=1, image_size=28, device="cpu", save_timesteps=None):
+        """
+        Generate image from pure noise by iteratively applying p_sample from t=T-1 to t=0
+        Return intermediate images for visualization
+
+        Returns:
+            snapshots: dict {timestep: (n_samples, C, H, W) image at that timestep}
+        """
+        unet.eval()
+
+        if save_timesteps is None:
+            save_timesteps = [800, 600, 400, 200, 100, 50, 0]
+        save_set = set(save_timesteps)
+
+        # start from pure noise
+        x = torch.randn(n_samples, image_channels, image_size, image_size, device=device)
+        snapshots = {self.T: x.clone().cpu()} # save the initial noise as well
+
+        for t in reversed(range(self.T)):
+            x = self.p_sample(unet, x, t)
+
+            if t in save_set:
+                snapshots[t] = x.clone().cpu() # save intermediate image for visualization
+
+        return snapshots
